@@ -24,7 +24,7 @@ f = lambda x,y,z: -1 * to_jax(u_lapl_)(x=x,y=y,z=z)
 ndims = 3
 
 
-k = 8
+k = 6
 n_1d = (2**k + 1) 
 
 x = jnp.zeros((n_1d,)*3)
@@ -81,8 +81,6 @@ def jacobi_nstep(nsteps, x_init, rhs):
     u,_ = jax.lax.scan(step, x_init, None, length=nsteps)
     return u
 
-
-
 def calc_residual(u, rhs):
     Ax = conv_lapl(u[None]).squeeze()
     return rhs - Ax
@@ -124,13 +122,13 @@ coarsen = (slice(None, None, 2),) * 3
 @jit
 def do_multigrid_step(u_pred):
     
-    # u_pred = jacobi_nstep(20, u_pred, rhs)
+    u_pred = jacobi_nstep(3, u_pred, rhs)
     residual = calc_residual(u_pred, rhs)
 
     e = jnp.zeros_like(residual)
     r = residual
     
-    solve_steps_in_stage = [64,128, 256]
+    solve_steps_in_stage = [2,2,2,2,100]
     for steps in solve_steps_in_stage:
         e = e[coarsen]
         r = r[coarsen]
@@ -144,12 +142,11 @@ def do_multigrid_step(u_pred):
     return e
 
 
-
 for _ in range(1000):
     tik = time.perf_counter()
 
     correction = do_multigrid_step(u_pred)
     u_pred = u_pred + correction
-    u_pred = jacobi_nstep(1000, u_pred, rhs)
+    u_pred = jacobi_nstep(3, u_pred, rhs)
     tok = time.perf_counter()
     print(calc_error(u_pred))
