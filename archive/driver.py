@@ -16,7 +16,6 @@ initialGuess = 0
 
 generateFunction = lambda x,y,z: np.sin(np.pi * x) * np.sin(np.pi * y) * np.sin(np.pi * z)
 trueFunction = lambda x,y,z: -3*np.pi**2 * np.sin(np.pi * x) * np.sin(np.pi * y) * np.sin(np.pi * z)
-
 originalGrid = np.zeros((dataSize,dataSize,dataSize))
 rhs = np.zeros((dataSize,dataSize,dataSize))
 trueGrid = np.zeros((dataSize,dataSize,dataSize))

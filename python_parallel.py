@@ -8,44 +8,34 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 import numpy as np
 import equinox as eqx
-import jax.random as jr
+from jax import random as jr, vmap, jit
 import time
 
+jax.config.update("jax_enable_x64", True)
 #### manufacturing a soln
 x,y,z = symbols('x y z')
 
 u_true_ = sin(pi * x) * sin(pi * y) * sin(pi * z)
 u_lapl_ = diff(u_true_, x, 2) +  diff(u_true_, y, 2) +  diff(u_true_, z, 2)
-
 u_true = lambda x,y,z: to_jax(u_true_)(x=x,y=y,z=z)
-f = lambda x,y,z: to_jax(u_lapl_)(x=x,y=y,z=z)
+f = lambda x,y,z: -1 * to_jax(u_lapl_)(x=x,y=y,z=z)
 
 ### config
 ndims = 3
 
 
-k = 6
-n_1d = (2**k + 1) + 2
+k = 8
+n_1d = (2**k + 1) 
 
-boundary_face_vals = g = [10,20,15,50,33,75]
-x_init = 0
-
-
-### dirchlet bcs
 x = jnp.zeros((n_1d,)*3)
-x = x.at[:,:,0].set(boundary_face_vals[0])
-x = x.at[:,:,-1].set(boundary_face_vals[1])
-x = x.at[0,:,:].set(boundary_face_vals[2])
-x = x.at[-1,:,:].set(boundary_face_vals[3])
-x = x.at[:,0,:].set(boundary_face_vals[4])
-x = x.at[:,-1,:].set(boundary_face_vals[5])
 u_pred = x
 
 
-c,d = 0,1 ## unit cube
+c,d = 0,1
 grid = jnp.linspace(c,d,n_1d)
 h = grid[1] - grid[0]
 grid = jnp.asarray(jnp.meshgrid(*(grid,)*ndims)).reshape(ndims,-1).T
+
 
 rhs = b = f(grid[:,0], grid[:,1], grid[:,2]).reshape((n_1d,)*ndims)
 u_soln = u_true(grid[:,0], grid[:,1], grid[:,2]).reshape((n_1d,)*ndims)
@@ -57,60 +47,71 @@ stencil = stencil.at[1,0,1].set(1) ## side/side
 stencil = stencil.at[1,-1,1].set(1)
 stencil = stencil.at[0,1,1].set(1) ## top/bottom
 stencil = stencil.at[-1,1,1].set(1) 
-
-
-
 jacobi_stencil = stencil
-lapl_stencil = stencil.at[1,1,1].set(-6)
 
+
+lapl_stencil = stencil.at[1,1,1].set(-6)
 
 key = jr.PRNGKey(0)
 conv_jacobi = eqx.tree_at(lambda k: k.weight, 
                 eqx.nn.Conv(3,1,1,3,use_bias=False,key=key), 
                 jacobi_stencil[None,None])
 
-conv_lapl = eqx.tree_at(lambda k: k.weight, 
-                eqx.nn.Conv(3,1,1,3,use_bias=False,key=key), 
-                lapl_stencil[None,None])
+conv_lapl = eqx.tree_at(lambda k: k.weight,
+                        eqx.nn.Conv(3,1,1,3,
+                                    padding='same',
+                                    use_bias=False,
+                                    key=key),
+                                    lapl_stencil[None,None])
 
 # Define trilinear kernel (normalized so weights sum to 1 for 3D linear interp)
-kernel = jnp.zeros((3, 3, 3))
-kernel = kernel.at[1, 1, 1].set(1.0 / 8)  # center
-neighbors = [
-    (0, 1, 1), (2, 1, 1),  # x
-    (1, 0, 1), (1, 2, 1),  # y
-    (1, 1, 0), (1, 1, 2)   # z
-]
-for i, j, k in neighbors:
-    kernel = kernel.at[i, j, k].set(1.0 / 8)
+kernel = jnp.array([0.5,1,0.5])
+fine_conv = lambda x: jnp.convolve(x.squeeze(), kernel, mode='same')
+### right hand input is kernel? 
 
-kernel = kernel[None, None, :, :, :]  # (out_chan, in_chan, D, H, W)
-
-up_conv = eqx.nn.Conv3d(1,1,3,use_bias=False,padding=1,key=key)
-up_conv = eqx.tree_at(lambda m: m.weight, up_conv, kernel)
-
+calc_error = lambda u_pred: jnp.linalg.norm(u_pred.flatten() - u_soln.flatten()) / jnp.linalg.norm(u_soln.flatten())
 
 def jacobi_nstep(nsteps, x_init, rhs):
 
     def step(carry, x):
         u = carry
-        u = u.at[1:-1, 1:-1, 1:-1].set(conv_jacobi(u[None]).squeeze())
-        u = (u - h**2 * rhs) / 6
+        u = u.at[1:-1,1:-1,1:-1].set((conv_jacobi(u[None]).squeeze() + (h**2 * rhs[1:-1,1:-1,1:-1])) / 6)
         return u,None
     
     u,_ = jax.lax.scan(step, x_init, None, length=nsteps)
     return u
 
+
+
 def calc_residual(u, rhs):
-    Ax = u.at[1:-1, 1:-1, 1:-1].set(conv_lapl(u[None]).squeeze())
-    return rhs-Ax
+    Ax = conv_lapl(u[None]).squeeze()
+    return rhs - Ax
+
+
+# u_pred = jacobi_nstep(20, u_pred, rhs)
+# print(u_pred.shape)
+
+# # for s in range(100):
+# #     u_pred = jacobi_nstep(20, u_pred, rhs)
+# #     print(calc_error(u_pred))
+
 
 def upsample(u):
     n = u.shape[0]
-    f = jnp.zeros((1, 2*n-1, 2*n-1, 2*n-1))
-    f = f.at[:, ::2, ::2, ::2].set(u[None, ...])  # inject coarse into even location
-    u_upsampled = up_conv(f).squeeze()
-    return u_upsampled
+    f = jnp.zeros((2*n-1, 2*n-1, 2*n-1))
+    f = f.at[::2, ::2, ::2].set(u)  # inject coarse into even location
+    kernel = jnp.array([0.5,1,0.5]) / 2.
+    fine_conv = lambda x: jnp.convolve(x.squeeze(), kernel, mode='same')
+
+    ### convolve each axis
+    f = vmap(vmap(fine_conv, in_axes=0), in_axes=0)(f)
+    f = f.transpose(1,2,0)
+    f = vmap(vmap(fine_conv, in_axes=0), in_axes=0)(f)
+    f = f.transpose(1,2,0)
+    f = vmap(vmap(fine_conv, in_axes=0), in_axes=0)(f)
+    f = f.transpose(1,2,0)
+
+    return f
 
 
 #### make u current coarse, doing u[coarsen] is the same as doing u[::2,::2,::2]
@@ -118,45 +119,37 @@ interior = (slice(1, -1),) * 3
 coarsen = (slice(None, None, 2),) * 3
 
 
-u_interior = u_pred[interior]
-rhs_interior = rhs[interior]
-
-
-
-
-
 ############# done setup ################################################
 
-@jax.jit
-def do_multigrid_step(u_interior):
-    r_interior = calc_residual(u_interior, rhs_interior)
+@jit
+def do_multigrid_step(u_pred):
+    
+    # u_pred = jacobi_nstep(20, u_pred, rhs)
+    residual = calc_residual(u_pred, rhs)
 
-    r_coarse = r_interior
-    rhs_coarse = rhs_interior
-
-    solve_steps_in_stage = [4,8,16,32]
+    e = jnp.zeros_like(residual)
+    r = residual
+    
+    solve_steps_in_stage = [64,128, 256]
     for steps in solve_steps_in_stage:
+        e = e[coarsen]
+        r = r[coarsen]
+        e = jacobi_nstep(steps, e, r)
 
-        r_coarse = r_coarse[coarsen]
-        rhs_coarse = rhs_coarse[coarsen]
+    for i,steps in enumerate(solve_steps_in_stage[::-1]):
+        e = upsample(e)
+        r = upsample(r)
+        e = jacobi_nstep(steps, e, r)
 
-        r_coarse = jacobi_nstep(steps, r_coarse, rhs_coarse)
-
-    r_up = r_coarse
-    rhs_up = rhs_coarse
-    for steps in solve_steps_in_stage[::-1]:
-        r_up = upsample(r_up)
-        rhs_up = upsample(rhs_up)
-        r_up = jacobi_nstep(steps, r_up, rhs_up)
+    return e
 
 
-    u_interior = u_interior - r_up 
-    return u_interior
 
-
-for _ in range(100):
+for _ in range(1000):
     tik = time.perf_counter()
-    u_interior = do_multigrid_step(u_interior)
-    u_interior.block_until_ready()
+
+    correction = do_multigrid_step(u_pred)
+    u_pred = u_pred + correction
+    u_pred = jacobi_nstep(1000, u_pred, rhs)
     tok = time.perf_counter()
-    print(jnp.linalg.norm(u_interior.flatten() - u_soln[interior].flatten()) / jnp.linalg.norm(u_soln[interior].flatten()), tok-tik)
+    print(calc_error(u_pred))
