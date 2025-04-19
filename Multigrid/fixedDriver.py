@@ -305,6 +305,7 @@ print("midpoint on modified original grid",output[midpoint,midpoint,midpoint])
 
 trueVal = matrixConstructionTools.buildBoundary(trueVal, boundaries)
 diff = trueVal - output
+print('REL L2', np.linalg.norm(diff.flatten()) / np.linalg.norm(trueVal.flatten()))
 largest = 0 
 
 
@@ -321,6 +322,7 @@ while(i < 129):
             k += 1
         j += 1
     i += 1
+
 
 print("largest diff",largestIndex,largest)
 """

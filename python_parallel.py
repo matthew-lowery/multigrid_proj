@@ -11,7 +11,8 @@ import equinox as eqx
 from jax import random as jr, vmap, jit
 import time
 
-jax.config.update("jax_enable_x64", True)
+
+# jax.config.update("jax_enable_x64", True)
 #### manufacturing a soln
 x,y,z = symbols('x y z')
 
@@ -24,7 +25,7 @@ f = lambda x,y,z: -1 * to_jax(u_lapl_)(x=x,y=y,z=z)
 ndims = 3
 
 
-k = 6
+k = 7
 n_1d = (2**k + 1) 
 
 x = jnp.zeros((n_1d,)*3)
@@ -32,9 +33,10 @@ u_pred = x
 
 
 c,d = 0,1
-grid = jnp.linspace(c,d,n_1d)
-h = grid[1] - grid[0]
-grid = jnp.asarray(jnp.meshgrid(*(grid,)*ndims)).reshape(ndims,-1).T
+grid_1d = jnp.linspace(c,d,n_1d)
+print(f'{grid_1d.shape=}')
+h = grid_1d[1] - grid_1d[0]
+grid = jnp.asarray(jnp.meshgrid(*(grid_1d,)*ndims)).reshape(ndims,-1).T
 
 
 rhs = b = f(grid[:,0], grid[:,1], grid[:,2]).reshape((n_1d,)*ndims)
@@ -71,14 +73,14 @@ fine_conv = lambda x: jnp.convolve(x.squeeze(), kernel, mode='same')
 
 calc_error = lambda u_pred: jnp.linalg.norm(u_pred.flatten() - u_soln.flatten()) / jnp.linalg.norm(u_soln.flatten())
 
-def jacobi_nstep(nsteps, x_init, rhs):
+def jacobi_nstep(nsteps, u_init, rhs, h):
 
     def step(carry, x):
         u = carry
         u = u.at[1:-1,1:-1,1:-1].set((conv_jacobi(u[None]).squeeze() + (h**2 * rhs[1:-1,1:-1,1:-1])) / 6)
         return u,None
     
-    u,_ = jax.lax.scan(step, x_init, None, length=nsteps)
+    u,_ = jax.lax.scan(step, u_init, None, length=nsteps)
     return u
 
 def calc_residual(u, rhs):
@@ -86,19 +88,11 @@ def calc_residual(u, rhs):
     return rhs - Ax
 
 
-# u_pred = jacobi_nstep(20, u_pred, rhs)
-# print(u_pred.shape)
-
-# # for s in range(100):
-# #     u_pred = jacobi_nstep(20, u_pred, rhs)
-# #     print(calc_error(u_pred))
-
-
 def upsample(u):
     n = u.shape[0]
     f = jnp.zeros((2*n-1, 2*n-1, 2*n-1))
     f = f.at[::2, ::2, ::2].set(u)  # inject coarse into even location
-    kernel = jnp.array([0.5,1,0.5]) / 2.
+    kernel = jnp.array([0.5,1,0.5])
     fine_conv = lambda x: jnp.convolve(x.squeeze(), kernel, mode='same')
 
     ### convolve each axis
@@ -117,36 +111,111 @@ interior = (slice(1, -1),) * 3
 coarsen = (slice(None, None, 2),) * 3
 
 
+# grid_test = jnp.asarray(jnp.meshgrid(*(np.arange(2**2+1),)*3))[0]
+# print(grid_test, 'og')
+# g_down = grid_test[coarsen]
+# g_up = upsample(g_down)
+# print(g_up, 'new')
+# print()
+
 ############# done setup ################################################
 
 @jit
-def do_multigrid_step(u_pred):
+def do_multigrid_step(u_pred, h):
     
-    u_pred = jacobi_nstep(3, u_pred, rhs)
-    residual = calc_residual(u_pred, rhs)
+    ### smooth before starting
+    u_pred = jacobi_nstep(3, u_pred, rhs, h)
 
+    residual = calc_residual(u_pred, rhs)
     e = jnp.zeros_like(residual)
     r = residual
     
-    solve_steps_in_stage = [2,2,2,2,100]
+    solve_steps_in_stage = [2,32,64,128,1000]
+
     for steps in solve_steps_in_stage:
+
+        h = h*2
         e = e[coarsen]
         r = r[coarsen]
-        e = jacobi_nstep(steps, e, r)
+        e = jacobi_nstep(steps, e, r, h)
 
     for i,steps in enumerate(solve_steps_in_stage[::-1]):
+        
+        h = h/2
         e = upsample(e)
         r = upsample(r)
-        e = jacobi_nstep(steps, e, r)
+        e = jacobi_nstep(steps, e, r, h)
+    
+    u_pred = u_pred + e
+    u_pred = jacobi_nstep(3, u_pred, rhs, h)
 
-    return e
+    return u_pred
 
+# dummy call for compilation
 
 for _ in range(1000):
     tik = time.perf_counter()
-
-    correction = do_multigrid_step(u_pred)
-    u_pred = u_pred + correction
-    u_pred = jacobi_nstep(3, u_pred, rhs)
+    e0 = calc_error(u_pred).item()
+    u_pred = do_multigrid_step(u_pred, h)
+    u_pred.block_until_ready()
     tok = time.perf_counter()
-    print(calc_error(u_pred))
+    e1 = calc_error(u_pred).item()
+    print(f'{e0=:.3f}, {e1=:.3f}, {tok-tik}')
+
+
+
+# import numpy as np
+# from matplotlib import pyplot as plt
+# from mpl_toolkits.mplot3d import Axes3D
+
+# # Define the 3D function
+# # def f(x, y, z):
+# #     return np.sin(np.pi * x) * np.sin(np.pi * y) * np.sin(np.pi * z)
+
+# # Generate a 3D grid
+# n = 50  # Number of points along each axis
+# x = np.linspace(0, 1, n)
+# y = np.linspace(0, 1, n)
+# z = np.linspace(0, 1, n)
+# X, Y, Z = np.meshgrid(x, y, z)
+
+# # Evaluate the function on the grid
+# values = f(X, Y, Z)
+
+# # Create a 3D plot
+# fig = plt.figure(figsize=(10, 8))
+# ax = fig.add_subplot(111, projection='3d')
+
+# # Plot slices of the function along the z-axis
+# z_slices = [0.25, 0.5, 0.75]  # Slices at different z values
+# for z_val in z_slices:
+#     Z_slice = np.full_like(X[:, :, 0], z_val)  # Create a constant z-plane
+#     ax.plot_surface(X[:, :, 0], Y[:, :, 0], Z_slice, facecolors=plt.cm.viridis(f(X[:, :, 0], Y[:, :, 0], z_val)), rstride=1, cstride=1, alpha=0.7)
+
+# # Add color bar
+# mappable = plt.cm.ScalarMappable(cmap='viridis')
+# mappable.set_array(values)
+# cbar = fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10)
+# cbar.set_label('Function Value')
+
+# # Set labels
+# ax.set_xlabel('X')
+# ax.set_ylabel('Y')
+# ax.set_zlabel('Z')
+# ax.set_title('3D Function Visualization with Slices')
+
+plt.show()
+
+
+###
+
+
+### powerpoint solve Ax=b, but dont form A... methods .... multigrid ... convolutions ... for loop same as ... what convolution? 
+###  
+
+
+### true u, rhs, pred u, residual plot, 
+
+### convergence wrt h? relative error
+
+### comparison with something existing? 

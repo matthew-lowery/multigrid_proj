@@ -230,5 +230,6 @@ trueVal = matrixConstructionTools.fillInValues(trueVal,trueFunction,[deltaX,delt
 
 
 trueVal = matrixConstructionTools.buildBoundary(trueVal, boundaries)
-print(trueVal - output)
+print('REL ERR', np.linalg.norm(trueVal.flatten() - output.flatten()) / np.linalg.norm(trueVal.flatten())) ##### WRONG --> REL ERR 1.0005306736092279
+# print(trueVal - output)
 
