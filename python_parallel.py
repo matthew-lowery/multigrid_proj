@@ -13,6 +13,7 @@ import time
 
 
 jax.config.update("jax_enable_x64", True)
+
 #### manufacturing a soln
 x,y,z = symbols('x y z')
 
@@ -51,7 +52,6 @@ stencil = stencil.at[0,1,1].set(1) ## top/bottom
 stencil = stencil.at[-1,1,1].set(1) 
 jacobi_stencil = stencil
 
-
 lapl_stencil = stencil.at[1,1,1].set(-6)
 
 key = jr.PRNGKey(0)
@@ -61,7 +61,6 @@ conv_jacobi = eqx.tree_at(lambda k: k.weight,
 
 conv_lapl = eqx.tree_at(lambda k: k.weight,
                         eqx.nn.Conv(3,1,1,3,
-                                    padding='same',
                                     use_bias=False,
                                     key=key),
                                     lapl_stencil[None,None])
@@ -83,10 +82,11 @@ def jacobi_nstep(nsteps, u_init, rhs, h):
     u,_ = jax.lax.scan(step, u_init, None, length=nsteps)
     return u
 
-def calc_residual(u, rhs):
-    Ax = conv_lapl(u[None]).squeeze()
-    return rhs - Ax
 
+def calc_residual(u, rhs):
+    Ax = jnp.zeros_like(rhs)
+    Ax = Ax.at[1:-1,1:-1,1:-1].set(conv_lapl(u[None]).squeeze())
+    return rhs - Ax
 
 def upsample(u):
     n = u.shape[0]
@@ -151,41 +151,6 @@ def do_multigrid_step(u_pred, h):
 
     return u_pred
 
-# @jit
-# def do_multigrid_step(u_pred, h):
-    
-#     ### smooth before starting
-#     u_pred = jacobi_nstep(3, u_pred, rhs, h)
-
-#     residual = calc_residual(u_pred, rhs)
-#     e = jnp.zeros_like(residual)
-#     r = residual
-    
-#     solve_steps_in_stage = [2,32,64,128,1000]
-
-#     cr = 2
-#     for steps in solve_steps_in_stage:
-#         h*=2
-#         err = e[::cr,::cr,::cr]
-#         res = r[::cr,::cr,::cr]
-#         e = e.at[::cr,::cr,::cr].set(jacobi_nstep(steps, err, res, h))
-#         cr = int(cr*2)
-
-#     for i,steps in enumerate(solve_steps_in_stage[::-1]):
-#         h = h/2
-#         nw = int(cr /2)
-#         err = e.at[::nw,::nw,::nw].set(upsample(e[::cr,::cr,::cr]))
-#         res = r.at[::nw,::nw,::nw].set(upsample(r[::cr,::cr,::cr]))
-#         e = e.at[::nw,::nw,::nw].set(jacobi_nstep(steps, err, res, h))
-#         cr = int(cr/2)
-
-#     u_pred = u_pred + e
-#     u_pred = jacobi_nstep(3, u_pred, rhs, h)
-
-#     return u_pred
-
-
-# dummy call for compilation
 
 u_pred = jacobi_nstep(1000, u_pred, rhs, h)
 e1 = calc_error(u_pred).item()
@@ -207,3 +172,18 @@ a = plt.contourf(np.linspace(0,1,129),np.linspace(0,1,129),u_pred[64])
 # plt.show()
 plt.colorbar(a)
 plt.savefig('stuff')
+
+
+time_conv3d = lambda: conv_jacobi(u_pred[None])
+
+import timeit
+
+for i in range(10):
+    tik = time.perf_counter()
+    x = time_conv3d()
+    x.block_until_ready()
+    tok = time.perf_counter()
+    print(tok-tik)
+
+# 0.000386479077860713
+# 1.7579877749085426e-05
